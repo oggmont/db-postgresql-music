@@ -1,0 +1,13 @@
+# Local settings (credentials, ports); .env.example is the committed template
+.env
+
+# Drafts, not ready to publish
+docs/API-Design.md
+CLAUDE.md
+
+# OS and editor files
+.DS_Store
+.vscode/
+.idea/
+
+Spotify Account Data/
