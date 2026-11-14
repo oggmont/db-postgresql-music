@@ -77,8 +77,9 @@ Inside `psql` you can run the example queries with `\i /queries/examples.sql`.
 │   ├── setup.sh            # one-time infrastructure setup (re-runnable)
 │   ├── budget.sh           # ~$1/month budget alert
 │   └── runlist-db.sh       # runs on the VM: install, backup, reset, verify
-├── .github/workflows/
-│   └── deploy.yml          # CI: load and verify the seed; manual deploy to the VM
+├── .github/
+│   ├── workflows/deploy.yml # CI: load and verify the seed; manual deploy to the VM
+│   └── dependabot.yml      # weekly updates of the pinned actions
 └── docs/
     ├── data-model.md       # table reference and relationships
     └── music-db-schema.jpg # full ER diagram: every table, column and foreign key

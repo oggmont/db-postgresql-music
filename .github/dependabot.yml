@@ -1,0 +1,10 @@
+# Keeps the SHA-pinned GitHub Actions up to date (one PR per week at most).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']

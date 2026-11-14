@@ -119,24 +119,40 @@ for s in runlist-db-password runlist-jwt-secret runlist-admin-password; do
 done
 g artifacts repositories add-iam-policy-binding runlist --location "$REGION" \
   --member "serviceAccount:$DEPLOYER" --role roles/artifactregistry.writer --quiet > /dev/null
-# run.developer: deploy Cloud Run; osAdminLogin + viewer + IAP tunnel: SSH to the DB VM.
-for role in roles/run.developer roles/compute.osAdminLogin roles/compute.viewer roles/iap.tunnelResourceAccessor; do
+# run.developer: deploy Cloud Run (it can only run as runlist-api / runlist-ui, see below).
+# compute.viewer: read-only, gcloud compute ssh looks the VM up. SSH itself is limited to the DB
+# VM: OS Login admin on that instance only, and the IAP tunnel only to its IP and port 22.
+for role in roles/run.developer roles/compute.viewer; do
   g projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:$DEPLOYER" --role "$role" \
     --condition None --quiet > /dev/null
 done
+g compute instances add-iam-policy-binding "$VM" --zone "$ZONE" --member "serviceAccount:$DEPLOYER" \
+  --role roles/compute.osAdminLogin --quiet > /dev/null
+g projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:$DEPLOYER" \
+  --role roles/iap.tunnelResourceAccessor --quiet \
+  --condition "expression=destination.ip == \"$DB_IP\" && destination.port == 22,title=ssh-runlist-db-only,description=IAP SSH tunnel to the runlist-db VM only" > /dev/null
 for sa in "$API_SA" "$UI_SA"; do
   g iam service-accounts add-iam-policy-binding "$sa" --member "serviceAccount:$DEPLOYER" \
     --role roles/iam.serviceAccountUser --quiet > /dev/null
 done
 
 step "Workload Identity Federation for GitHub Actions (no keys)"
+# Only pushes to / manual runs on main of the three repos get a token. The owner is matched by
+# its numeric ID, which survives renames and can't be re-registered by someone else.
+OWNER_ID=$(curl -fsS "https://api.github.com/users/$GITHUB_OWNER" | sed -n 's/^  "id": \([0-9]*\),$/\1/p')
+REPO_LIST=$(printf "'$GITHUB_OWNER/%s', " "${REPOS[@]}")
+CONDITION="assertion.repository_owner_id == '$OWNER_ID' && assertion.repository in [${REPO_LIST%, }] && assertion.ref == 'refs/heads/main' && assertion.event_name in ['push', 'workflow_dispatch']"
+MAPPING="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.repository_owner_id=assertion.repository_owner_id,attribute.ref=assertion.ref"
 exists g iam workload-identity-pools describe github --location global ||
   g iam workload-identity-pools create github --location global --display-name "GitHub Actions"
-exists g iam workload-identity-pools providers describe github-oidc --location global --workload-identity-pool github ||
+if exists g iam workload-identity-pools providers describe github-oidc --location global --workload-identity-pool github; then
+  g iam workload-identity-pools providers update-oidc github-oidc --location global --workload-identity-pool github \
+    --attribute-mapping "$MAPPING" --attribute-condition "$CONDITION" > /dev/null
+else
   g iam workload-identity-pools providers create-oidc github-oidc --location global --workload-identity-pool github \
     --display-name "GitHub OIDC" --issuer-uri https://token.actions.githubusercontent.com \
-    --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref" \
-    --attribute-condition "assertion.repository_owner == '$GITHUB_OWNER'"
+    --attribute-mapping "$MAPPING" --attribute-condition "$CONDITION"
+fi
 for repo in "${REPOS[@]}"; do
   g iam service-accounts add-iam-policy-binding "$DEPLOYER" --role roles/iam.workloadIdentityUser \
     --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/$GITHUB_OWNER/$repo" \
@@ -148,7 +164,8 @@ cat << EOF
 Done. Next:
   1. Push restapi-spring-runlist and ui-react-runlist to main (or run their CI/CD workflow):
      they create the Cloud Run services runlist-api and runlist-ui.
-  2. Make both public (once; deploys keep it):
+  2. Allow unauthenticated calls (once; deploys keep it). The API's ingress is internal, so
+     only the UI (through the VPC) can reach it; the UI is the public entry point:
        gcloud run services add-iam-policy-binding runlist-api --region $REGION --member allUsers --role roles/run.invoker
        gcloud run services add-iam-policy-binding runlist-ui  --region $REGION --member allUsers --role roles/run.invoker
   3. Budget alert (alerts only, it doesn't stop anything):
