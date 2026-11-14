@@ -85,6 +85,24 @@ Inside `psql` you can run the example queries with `\i /queries/examples.sql`.
     └── music-db-schema.jpg # full ER diagram: every table, column and foreign key
 ```
 
+## Environments
+
+Runlist has two environments. **Use dev for everything except real use**, so prod stays inside the GCP free tier and doesn't get billed.
+
+| Environment | Where it runs | What it's for |
+|---|---|---|
+| **dev** | Docker on the owner's Mac (not GCP): the database (db-postgresql-runlist, `make up`), the API (restapi-spring-runlist, `make up`, http://localhost:8081) and the UI (ui-react-runlist, `make up`, http://localhost:5173) | Development, testing, trying changes, demos, end-to-end and load tests. Free; use it as much as you like. |
+| **prod** | GCP project `runlist-514701` (free tier): the UI at https://runlist-ui-894040023319.us-central1.run.app, the API on Cloud Run (internal only), PostgreSQL on the e2-micro VM `runlist-db` | Real use, a few sessions a week. |
+
+Rules for prod:
+
+- **Keep usage light.** Don't point tests, scripts, load tests or e2e suites at prod, and don't use it to debug. Reproduce problems in dev. Heavy traffic can push it out of the free tier: Cloud Run CPU time, outbound traffic and logs are billed beyond the free amounts.
+- **Every push to `main` of the UI or the API deploys to prod**, through the GitHub Actions workflows (pushes that only change Markdown files don't). Check changes in dev first (`make reset`, `make verify`), and group them instead of pushing many small deploys.
+- **Prod data is real.** It holds what people did in the app. Don't reset or edit it to test something; back it up before any change (db-postgresql-runlist's workflow, `backup` action).
+- A budget alert (about $1 a month) emails the billing account if prod starts costing money. It only alerts; it doesn't stop anything.
+
+Here, dev is the `music-db-postgres` container (`make up`; the port is `POSTGRES_PORT` in `.env`). Prod is the `runlist-postgres` container on the VM.
+
 ## Deployment (Google Cloud)
 
 The database runs on GCP as PostgreSQL 17 in Docker, on the free e2-micro VM `runlist-db` (project `runlist-514701`, zone `us-central1-a`). The VM has no public IP; the API on Cloud Run reaches it privately at `10.128.0.10`. The same project hosts the API and the web UI (https://runlist-ui-894040023319.us-central1.run.app), all inside the free tier.
