@@ -58,7 +58,7 @@ Each repository has `.github/workflows/deploy.yml`. They authenticate to GCP wit
 | Repository | On every push and PR | On push to `main` |
 |---|---|---|
 | ui-react-runlist | `npm run check` | build the nginx image, push to Artifact Registry, deploy `runlist-ui` |
-| restapi-spring-runlist | `./mvnw verify` (integration tests use this repo's `db/init`) | build the image, push, deploy `runlist-api` |
+| restapi-spring-runlist | `./mvnw test`, and `./mvnw verify` with this repo's `db/init` (doesn't gate the deploy yet: many integration tests still assume the old seed) | build the image, push, deploy `runlist-api` |
 | db-postgresql-runlist | load `db/init` into PostgreSQL 17, check `verify.sql`, run `examples.sql` | nothing automatic (see below) |
 
 The database is **never reset automatically**, because the live data holds what people did in the app. Run the database workflow by hand (Actions > CI/CD > Run workflow, on `main`), with one of these actions:
