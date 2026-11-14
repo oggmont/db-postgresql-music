@@ -1,0 +1,131 @@
+# CI/CD for the database.
+#   Pull requests and pushes: load db/init into a throwaway PostgreSQL 17, then check every
+#   table's row count (verify.sql) and run the example queries.
+#   Manual run (Actions > CI/CD > Run workflow), on the GCP VM "runlist-db":
+#     scripts  copy db/init, db/queries and deploy/gcp/runlist-db.sh to the VM (data untouched)
+#     backup   pg_dump on the VM (the 10 newest are kept in /var/lib/runlist/backups)
+#     reset    back up, then DELETE ALL DATA and reload db/init; restarts the API so it sets the
+#              super user's password again. Accounts and playlists made in the app are lost.
+# Resetting is never automatic: the live database holds what people did in the app.
+# GCP access is keyless (Workload Identity Federation); see deploy/gcp/README.md.
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do on the GCP database VM
+        type: choice
+        options: [scripts, backup, reset]
+        default: scripts
+      confirm:
+        description: For reset, type RESET (all app data is replaced by the seed)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_ID: runlist-514701
+  REGION: us-central1
+  ZONE: us-central1-a
+  VM: runlist-db
+  WIF_PROVIDER: projects/894040023319/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOYER: github-deployer@runlist-514701.iam.gserviceaccount.com
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Load the schema and seed into PostgreSQL 17
+        run: |
+          docker run -d --name music-db-test \
+            -e POSTGRES_USER=music -e POSTGRES_PASSWORD=music -e POSTGRES_DB=music_db \
+            -v "$PWD/db/init:/docker-entrypoint-initdb.d:ro" -v "$PWD/db/queries:/queries:ro" \
+            postgres:17-alpine
+          for _ in $(seq 1 90); do
+            if docker logs music-db-test 2>&1 | grep -q "PostgreSQL init process complete"; then break; fi
+            if ! docker ps -q -f name=music-db-test | grep -q .; then break; fi
+            sleep 2
+          done
+          docker logs music-db-test > init.log 2>&1
+          if grep -E "ERROR|FATAL" init.log; then echo "::error::The init scripts failed"; exit 1; fi
+          grep -q "PostgreSQL init process complete" init.log || { tail -50 init.log; exit 1; }
+          for _ in $(seq 1 30); do docker exec music-db-test pg_isready -h 127.0.0.1 -U music -d music_db && break; sleep 1; done
+      - name: Row counts (verify.sql)
+        run: |
+          docker exec music-db-test psql -X -v ON_ERROR_STOP=1 -U music -d music_db -f /queries/verify.sql | tee verify.txt
+          if grep -q MISMATCH verify.txt; then echo "::error::Row counts don't match verify.sql"; exit 1; fi
+      - name: Example queries
+        run: docker exec music-db-test psql -X -v ON_ERROR_STOP=1 -U music -d music_db -f /queries/examples.sql > /dev/null
+
+  deploy:
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-db
+      cancel-in-progress: false
+    steps:
+      - name: Check the confirmation
+        if: inputs.action == 'reset' && inputs.confirm != 'RESET'
+        run: |
+          echo "::error::Type RESET in 'confirm' to reset the database"
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # The VM has no external IP: SSH goes through Identity-Aware Proxy, with OS Login.
+      - name: Copy scripts and seed to the VM
+        run: |
+          mkdir -p bundle/seed
+          cp -R db/init db/queries bundle/seed/
+          cp deploy/gcp/runlist-db.sh bundle/seed/
+          tar -C bundle -czf seed.tgz seed
+          gcloud compute scp seed.tgz "$VM:/tmp/seed.tgz" \
+            --project "$PROJECT_ID" --zone "$ZONE" --tunnel-through-iap --quiet
+          gcloud compute ssh "$VM" --project "$PROJECT_ID" --zone "$ZONE" --tunnel-through-iap --quiet --command '
+            set -e
+            sudo rm -rf /var/lib/runlist/seed
+            sudo tar --no-same-owner -xzf /tmp/seed.tgz -C /var/lib/runlist
+            sudo install -m 755 /var/lib/runlist/seed/runlist-db.sh /var/lib/runlist/runlist-db.sh
+            rm -f /tmp/seed.tgz
+            sudo bash /var/lib/runlist/runlist-db.sh start'
+
+      - name: Back up
+        if: inputs.action == 'backup'
+        run: |
+          gcloud compute ssh "$VM" --project "$PROJECT_ID" --zone "$ZONE" --tunnel-through-iap --quiet \
+            --command 'sudo bash /var/lib/runlist/runlist-db.sh backup'
+
+      - name: Reset and reload the seed
+        if: inputs.action == 'reset'
+        run: |
+          gcloud compute ssh "$VM" --project "$PROJECT_ID" --zone "$ZONE" --tunnel-through-iap --quiet --command '
+            set -e
+            sudo bash /var/lib/runlist/runlist-db.sh reset /var/lib/runlist/seed/init
+            sudo bash /var/lib/runlist/runlist-db.sh verify > /tmp/verify.txt
+            cat /tmp/verify.txt
+            ! grep -q MISMATCH /tmp/verify.txt'
+
+      # The seed has no password for the super user: a new API revision sets it on start.
+      - name: Restart the API
+        if: inputs.action == 'reset'
+        run: |
+          gcloud run services update runlist-api --project "$PROJECT_ID" --region "$REGION" \
+            --update-env-vars "DB_SEED=${{ github.sha }}-${{ github.run_id }}" --quiet

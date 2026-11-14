@@ -72,10 +72,29 @@ Inside `psql` you can run the example queries with `\i /queries/examples.sql`.
 │   └── queries/
 │       ├── verify.sql      # row-count check
 │       └── examples.sql    # sample queries (catalog, playlists, users)
+├── deploy/gcp/             # Google Cloud deployment of the whole platform (see below)
+│   ├── README.md           # architecture, resources, costs, CI/CD, operations
+│   ├── setup.sh            # one-time infrastructure setup (re-runnable)
+│   ├── budget.sh           # ~$1/month budget alert
+│   └── runlist-db.sh       # runs on the VM: install, backup, reset, verify
+├── .github/workflows/
+│   └── deploy.yml          # CI: load and verify the seed; manual deploy to the VM
 └── docs/
     ├── data-model.md       # table reference and relationships
     └── music-db-schema.jpg # full ER diagram: every table, column and foreign key
 ```
+
+## Deployment (Google Cloud)
+
+The database runs on GCP as PostgreSQL 17 in Docker, on the free e2-micro VM `runlist-db` (project `runlist-514701`, zone `us-central1-a`). The VM has no public IP; the API on Cloud Run reaches it privately at `10.128.0.10`. The same project hosts the API and the web UI (https://runlist-ui-894040023319.us-central1.run.app), all inside the free tier.
+
+- **CI**, on every push and pull request: [.github/workflows/deploy.yml](.github/workflows/deploy.yml) loads `db/init` into a throwaway PostgreSQL 17, checks `verify.sql` and runs `examples.sql`.
+- **Deploying to the VM** is manual (Actions > CI/CD > Run workflow), because the live data holds what people did in the app. The workflow has three actions:
+  - `scripts` copies the files to the VM.
+  - `backup` runs `pg_dump`.
+  - `reset` reloads `db/init`. Type `RESET` to confirm, because it **deletes all app data**.
+
+Everything about the deployment is in [deploy/gcp/README.md](deploy/gcp/README.md): architecture, resources, costs, CI/CD for all three repos, and operations such as a SQL shell, backups and logs.
 
 ## Data model
 
